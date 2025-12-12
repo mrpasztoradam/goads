@@ -6,7 +6,6 @@ package twincat
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 
 	"github.com/mrpasztoradam/goads/ams"
