@@ -91,6 +91,23 @@ func (buf *Buffer) ReadFloat32Slice(n int) []float32 {
 	return fa
 }
 
+// Read reads bytes into b from the buffer.
+func (buf *Buffer) Read(b []byte) {
+	buf.ReadFull(b)
+}
+
+// ReadUint8 reads a uint8 from the buffer.
+func (buf *Buffer) ReadUint8() uint8 {
+	if buf.err != nil {
+		return 0
+	}
+	b := buf.ReadN(1)
+	if len(b) == 0 {
+		return 0
+	}
+	return b[0]
+}
+
 // ReadUint16 reads a uint16 from the buffer.
 func (buf *Buffer) ReadUint16() uint16 {
 	if buf.err != nil {
@@ -161,6 +178,14 @@ func (buf *Buffer) WriteFloat32Slice(a []float32) {
 		aa[i] = math.Float32bits(a[i])
 	}
 	buf.WriteUint32Slice(aa)
+}
+
+// WriteUint8 writes a uint8 to the buffer.
+func (buf *Buffer) WriteUint8(n uint8) {
+	if buf.err != nil {
+		return
+	}
+	_, buf.err = buf.b.Write([]byte{n})
 }
 
 // WriteUint16 writes a uint16 to the buffer.

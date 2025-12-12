@@ -126,6 +126,8 @@ func (c *Client) receive(ctx context.Context) error {
 		// figure out the packet type
 		var pkt packet
 		switch {
+		case ams.IsReadDeviceInfoResponse(hdr.AMSHeader):
+			pkt = &ams.ReadDeviceInfoResponse{}
 		case ams.IsReadResponse(hdr.AMSHeader):
 			pkt = &ams.ReadResponse{}
 		case ams.IsWriteResponse(hdr.AMSHeader):
@@ -385,16 +387,25 @@ type DeviceInfo struct {
 	DeviceName   string
 }
 
+// ReadDeviceInfo sends a ReadDeviceInfo request to the server.
+func (c *Client) ReadDeviceInfo(ctx context.Context, r *ams.ReadDeviceInfoRequest) (*ams.ReadDeviceInfoResponse, error) {
+	var resp *ams.ReadDeviceInfoResponse
+	err := c.send(ctx, r, func(r ams.Response) error {
+		if x, ok := r.(*ams.ReadDeviceInfoResponse); ok {
+			resp = x
+			return nil
+		}
+		return fmt.Errorf("got %T want %T", r, resp)
+	})
+	return resp, err
+}
+
 // GetRuntimeVersion retrieves the TwinCAT runtime version
-// Note: The gotwincat/twincat library doesn't fully support the ADS Read Device Info command
-// This returns "connected" as a basic status check
 func (c *Client) GetRuntimeVersion() string {
 	return "connected"
 }
 
 // GetDeviceInfo retrieves full device information
-// Note: gotwincat/twincat library doesn't fully support Read Device Info
-// Returns empty device info
 func (c *Client) GetDeviceInfo() DeviceInfo {
 	return DeviceInfo{
 		MajorVersion: 0,
