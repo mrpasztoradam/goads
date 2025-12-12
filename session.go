@@ -118,13 +118,9 @@ func (s *Session) LoadSymbolTable(ctx context.Context) error {
 		return fmt.Errorf("failed to get symbol upload info: %w", err)
 	}
 
-	// Debug: log info response
-	fmt.Printf("DEBUG: Upload info response size: %d bytes\n", len(infoResp.Data))
-	if len(infoResp.Data) >= 24 {
+	// Check if there are any symbols
+	if len(infoResp.Data) >= 4 {
 		symbolCount := binary.LittleEndian.Uint32(infoResp.Data[0:4])
-		symbolLength := binary.LittleEndian.Uint32(infoResp.Data[4:8])
-		fmt.Printf("DEBUG: Symbol count from info: %d, total length: %d bytes\n", symbolCount, symbolLength)
-		
 		// If no symbols, return early
 		if symbolCount == 0 {
 			return nil
@@ -143,12 +139,6 @@ func (s *Session) LoadSymbolTable(ctx context.Context) error {
 	resp, err := s.client.Read(ctx, req)
 	if err != nil {
 		return fmt.Errorf("failed to upload symbol table: %w", err)
-	}
-
-	// Debug: log response size
-	fmt.Printf("DEBUG: Symbol table upload response size: %d bytes\n", len(resp.Data))
-	if len(resp.Data) > 0 {
-		fmt.Printf("DEBUG: First 64 bytes: %X\n", resp.Data[:min(64, len(resp.Data))])
 	}
 
 	// Parse the symbol table
