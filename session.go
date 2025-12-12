@@ -15,6 +15,13 @@ import (
 	"github.com/mrpasztoradam/goads/ams"
 )
 
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // Session represents a cached ADS session with a specific target
 type Session struct {
 	client     *Client
@@ -96,20 +103,52 @@ func (c *Client) NewSession(targetAddr, senderAddr ams.Addr) *Session {
 // LoadSymbolTable loads the entire symbol table from the PLC using ADS native upload
 // This is the most efficient way to load all symbols at once
 func (s *Session) LoadSymbolTable(ctx context.Context) error {
-	// Use ADSIGRP_SYM_UPLOAD (0xF00B) to get the entire symbol table
-	// This is much more efficient than loading symbols one by one
-	req := ams.NewReadWriteRequest(
+	// First, try to get upload info (0xF00C ADSIGRP_SYM_UPLOADINFO2)
+	// This tells us the size of the symbol table
+	infoReq := ams.NewReadRequest(
+		s.targetAddr,
+		s.senderAddr,
+		0xF00C, // ADSIGRP_SYM_UPLOADINFO2
+		0x0,
+		0x30, // 48 bytes for upload info structure
+	)
+
+	infoResp, err := s.client.Read(ctx, infoReq)
+	if err != nil {
+		return fmt.Errorf("failed to get symbol upload info: %w", err)
+	}
+
+	// Debug: log info response
+	fmt.Printf("DEBUG: Upload info response size: %d bytes\n", len(infoResp.Data))
+	if len(infoResp.Data) >= 24 {
+		symbolCount := binary.LittleEndian.Uint32(infoResp.Data[0:4])
+		symbolLength := binary.LittleEndian.Uint32(infoResp.Data[4:8])
+		fmt.Printf("DEBUG: Symbol count from info: %d, total length: %d bytes\n", symbolCount, symbolLength)
+		
+		// If no symbols, return early
+		if symbolCount == 0 {
+			return nil
+		}
+	}
+
+	// Now upload the actual symbol table (0xF00B ADSIGRP_SYM_UPLOAD)
+	req := ams.NewReadRequest(
 		s.targetAddr,
 		s.senderAddr,
 		0xF00B, // ADSIGRP_SYM_UPLOAD
 		0x0,
 		0xFFFFFF, // Request large buffer for symbol table
-		nil,
 	)
 
-	resp, err := s.client.ReadWrite(ctx, req)
+	resp, err := s.client.Read(ctx, req)
 	if err != nil {
 		return fmt.Errorf("failed to upload symbol table: %w", err)
+	}
+
+	// Debug: log response size
+	fmt.Printf("DEBUG: Symbol table upload response size: %d bytes\n", len(resp.Data))
+	if len(resp.Data) > 0 {
+		fmt.Printf("DEBUG: First 64 bytes: %X\n", resp.Data[:min(64, len(resp.Data))])
 	}
 
 	// Parse the symbol table
