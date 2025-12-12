@@ -1,10 +1,4 @@
-// Copyright 2021 gotwincat authors. All rights reserved.
-// Use of this source code is governed by a MIT-style license that can be
-// found in the LICENSE file.
-
-// Package twincat implements a Twincat v3 client
-// for the Beckhoff AMS protocol.
-package twincat
+package goads
 
 import (
 	"context"
@@ -19,6 +13,14 @@ import (
 
 	"github.com/mrpasztoradam/goads/ams"
 )
+
+// Buffer pool for receive operations to reduce GC pressure
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 1500) // Standard MTU size
+		return &buf
+	},
+}
 
 var ErrTimeout = errors.New("timeout")
 
@@ -90,10 +92,13 @@ func (c *Client) receive(ctx context.Context) error {
 	const packetSize = 1500
 
 	for {
-		// read the next packet
-		data := make([]byte, packetSize)
+		// Get buffer from pool
+		bufPtr := bufferPool.Get().(*[]byte)
+		data := *bufPtr
+
 		n, err := c.conn.Read(data)
 		if err != nil {
+			bufferPool.Put(bufPtr) // Return buffer to pool
 			return err
 		}
 
@@ -151,6 +156,7 @@ func (c *Client) receive(ctx context.Context) error {
 			// if there is no handler then drop the packet
 			if h == nil {
 				log.Printf("client: no handler for %d", invokeID)
+				bufferPool.Put(bufPtr) // Return buffer to pool
 				continue
 			}
 
@@ -159,7 +165,9 @@ func (c *Client) receive(ctx context.Context) error {
 			// one response. So this call should never block.
 			select {
 			case <-ctx.Done():
+				bufferPool.Put(bufPtr) // Return buffer to pool
 			case h <- pkt:
+				bufferPool.Put(bufPtr) // Return buffer to pool after sending
 				close(h)
 			}
 		}

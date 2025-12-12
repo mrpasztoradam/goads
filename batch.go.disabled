@@ -1,0 +1,261 @@
+package goads
+
+import (
+	"context"
+	"encoding/binary"
+	"fmt"
+
+	"github.com/mrpasztoradam/goads/ams"
+)
+
+// BatchReadResult represents the result of a batch read operation
+type BatchReadResult struct {
+	Name  string
+	Data  []byte
+	Error error
+}
+
+// BatchWriteResult represents the result of a batch write operation
+type BatchWriteResult struct {
+	Name    string
+	Success bool
+	Error   error
+}
+
+// ReadBatch reads multiple variables in a single ADS request
+// This is much more efficient than reading variables one by one
+func (s *Session) ReadBatch(ctx context.Context, names []string) (map[string]*BatchReadResult, error) {
+	if len(names) == 0 {
+		return make(map[string]*BatchReadResult), nil
+	}
+
+	results := make(map[string]*BatchReadResult, len(names))
+
+	// Get handles and symbol info for all variables
+	type varInfo struct {
+		name   string
+		handle uint32
+		size   uint32
+	}
+	vars := make([]varInfo, 0, len(names))
+
+	for _, name := range names {
+		// Get symbol info (from cache or fetch)
+		info, err := s.GetSymbol(ctx, name)
+		if err != nil {
+			results[name] = &BatchReadResult{
+				Name:  name,
+				Error: fmt.Errorf("failed to get symbol info: %w", err),
+			}
+			continue
+		}
+
+		// Get handle (from cache or fetch)
+		handle, err := s.getOrCreateHandle(ctx, name)
+		if err != nil {
+			results[name] = &BatchReadResult{
+				Name:  name,
+				Error: fmt.Errorf("failed to get handle: %w", err),
+			}
+			continue
+		}
+
+		vars = append(vars, varInfo{
+			name:   name,
+			handle: handle,
+			size:   info.Size,
+		})
+	}
+
+	// Build sum-up read request
+	// Format: [indexGroup][indexOffset][readLength] * N
+	requestData := make([]byte, len(vars)*12)
+	offset := 0
+
+	for _, v := range vars {
+		binary.LittleEndian.PutUint32(requestData[offset:], 0xF005)     // ADSIGRP_SYM_VALBYHND
+		binary.LittleEndian.PutUint32(requestData[offset+4:], v.handle) // handle as offset
+		binary.LittleEndian.PutUint32(requestData[offset+8:], v.size)   // read length
+		offset += 12
+	}
+
+	// Execute sum-up read (0xF080 = ADSIGRP_SUMUP_READ)
+	req := ams.NewReadWriteRequest(
+		s.targetAddr,
+		s.senderAddr,
+		0xF080, // ADSIGRP_SUMUP_READ
+		uint32(len(vars)),
+		0xFFFFFF, // large read buffer
+		requestData,
+	)
+
+	resp, err := s.client.ReadWrite(ctx, req)
+	if err != nil {
+		// If batch read fails, fall back to individual reads
+		for _, v := range vars {
+			data, _, readErr := s.Read(ctx, v.name)
+			results[v.name] = &BatchReadResult{
+				Name:  v.name,
+				Data:  data,
+				Error: readErr,
+			}
+		}
+		return results, nil
+	}
+
+	// Parse sum-up response
+	// Format: [errorCode][length][data] * N
+	respOffset := 0
+	for _, v := range vars {
+		if respOffset+8 > len(resp.Data) {
+			results[v.name] = &BatchReadResult{
+				Name:  v.name,
+				Error: fmt.Errorf("response too short"),
+			}
+			continue
+		}
+
+		errorCode := binary.LittleEndian.Uint32(resp.Data[respOffset:])
+		dataLength := binary.LittleEndian.Uint32(resp.Data[respOffset+4:])
+		respOffset += 8
+
+		if errorCode != 0 {
+			results[v.name] = &BatchReadResult{
+				Name:  v.name,
+				Error: fmt.Errorf("ADS error code: %d", errorCode),
+			}
+			respOffset += int(dataLength)
+			continue
+		}
+
+		if respOffset+int(dataLength) > len(resp.Data) {
+			results[v.name] = &BatchReadResult{
+				Name:  v.name,
+				Error: fmt.Errorf("data length exceeds response"),
+			}
+			continue
+		}
+
+		data := make([]byte, dataLength)
+		copy(data, resp.Data[respOffset:respOffset+int(dataLength)])
+		respOffset += int(dataLength)
+
+		results[v.name] = &BatchReadResult{
+			Name:  v.name,
+			Data:  data,
+			Error: nil,
+		}
+	}
+
+	return results, nil
+}
+
+// WriteBatch writes multiple variables in a single ADS request
+// This is much more efficient than writing variables one by one
+func (s *Session) WriteBatch(ctx context.Context, writes map[string][]byte) (map[string]*BatchWriteResult, error) {
+	if len(writes) == 0 {
+		return make(map[string]*BatchWriteResult), nil
+	}
+
+	results := make(map[string]*BatchWriteResult, len(writes))
+
+	// Get handles for all variables
+	type varInfo struct {
+		name   string
+		handle uint32
+		data   []byte
+	}
+	vars := make([]varInfo, 0, len(writes))
+
+	for name, data := range writes {
+		// Get handle (from cache or fetch)
+		handle, err := s.getOrCreateHandle(ctx, name)
+		if err != nil {
+			results[name] = &BatchWriteResult{
+				Name:    name,
+				Success: false,
+				Error:   fmt.Errorf("failed to get handle: %w", err),
+			}
+			continue
+		}
+
+		vars = append(vars, varInfo{
+			name:   name,
+			handle: handle,
+			data:   data,
+		})
+	}
+
+	// Build sum-up write request
+	// Format: [indexGroup][indexOffset][writeLength][data] * N
+	totalSize := 0
+	for _, v := range vars {
+		totalSize += 12 + len(v.data)
+	}
+
+	requestData := make([]byte, totalSize)
+	offset := 0
+
+	for _, v := range vars {
+		binary.LittleEndian.PutUint32(requestData[offset:], 0xF005)        // ADSIGRP_SYM_VALBYHND
+		binary.LittleEndian.PutUint32(requestData[offset+4:], v.handle)    // handle as offset
+		binary.LittleEndian.PutUint32(requestData[offset+8:], uint32(len(v.data))) // write length
+		offset += 12
+		copy(requestData[offset:], v.data)
+		offset += len(v.data)
+	}
+
+	// Execute sum-up write (0xF081 = ADSIGRP_SUMUP_WRITE)
+	req := ams.NewReadWriteRequest(
+		s.targetAddr,
+		s.senderAddr,
+		0xF081, // ADSIGRP_SUMUP_WRITE
+		uint32(len(vars)),
+		len(vars)*4, // response size (error codes)
+		requestData,
+	)
+
+	resp, err := s.client.ReadWrite(ctx, req)
+	if err != nil {
+		// If batch write fails, fall back to individual writes
+		for _, v := range vars {
+			writeErr := s.Write(ctx, v.name, v.data)
+			results[v.name] = &BatchWriteResult{
+				Name:    v.name,
+				Success: writeErr == nil,
+				Error:   writeErr,
+			}
+		}
+		return results, nil
+	}
+
+	// Parse sum-up response
+	// Format: [errorCode] * N
+	for i, v := range vars {
+		if i*4+4 > len(resp.Data) {
+			results[v.name] = &BatchWriteResult{
+				Name:    v.name,
+				Success: false,
+				Error:   fmt.Errorf("response too short"),
+			}
+			continue
+		}
+
+		errorCode := binary.LittleEndian.Uint32(resp.Data[i*4:])
+		if errorCode != 0 {
+			results[v.name] = &BatchWriteResult{
+				Name:    v.name,
+				Success: false,
+				Error:   fmt.Errorf("ADS error code: %d", errorCode),
+			}
+		} else {
+			results[v.name] = &BatchWriteResult{
+				Name:    v.name,
+				Success: true,
+				Error:   nil,
+			}
+		}
+	}
+
+	return results, nil
+}

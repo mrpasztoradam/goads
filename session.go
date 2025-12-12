@@ -1,8 +1,4 @@
-// Copyright 2021 gotwincat authors. All rights reserved.
-// Use of this source code is governed by a MIT-style license that can be
-// found in the LICENSE file.
-
-package twincat
+package goads
 
 import (
 	"context"
@@ -33,14 +29,14 @@ type Session struct {
 
 // SymbolInfo contains cached information about a PLC symbol
 type SymbolInfo struct {
-	Name       string        `json:"name"`
-	DataType   string        `json:"dataType"`
-	Size       uint32        `json:"size"`
-	IndexGroup uint32        `json:"indexGroup"`
-	IndexOffset uint32       `json:"indexOffset"`
-	Handle     uint32        `json:"handle,omitempty"`
-	Comment    string        `json:"comment,omitempty"`
-	Fields     []StructField `json:"fields,omitempty"`
+	Name        string        `json:"name"`
+	DataType    string        `json:"dataType"`
+	Size        uint32        `json:"size"`
+	IndexGroup  uint32        `json:"indexGroup"`
+	IndexOffset uint32        `json:"indexOffset"`
+	Handle      uint32        `json:"handle,omitempty"`
+	Comment     string        `json:"comment,omitempty"`
+	Fields      []StructField `json:"fields,omitempty"`
 }
 
 // SymbolRegistry holds cached symbol information
@@ -397,7 +393,7 @@ func (s *Session) ReleaseHandle(ctx context.Context, handle uint32) error {
 // Close releases all cached handles
 func (s *Session) Close(ctx context.Context) error {
 	allSymbols := s.registry.GetAll()
-	
+
 	var firstErr error
 	for _, info := range allSymbols {
 		if info.Handle != 0 {
@@ -406,7 +402,7 @@ func (s *Session) Close(ctx context.Context) error {
 			}
 		}
 	}
-	
+
 	return firstErr
 }
 
