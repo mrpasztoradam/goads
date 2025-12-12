@@ -2,7 +2,6 @@ package goads
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"sync"
 	"time"
@@ -105,72 +104,42 @@ func (nm *NotificationManager) Subscribe(
 		CycleTime: uint32(cycleTime.Nanoseconds() / 100),
 	}
 
-	// Build request data: handle (4) + attribs (32)
-	reqData := make([]byte, 36)
-	binary.LittleEndian.PutUint32(reqData[0:4], handle)
-	binary.LittleEndian.PutUint32(reqData[4:8], attribs.Length)
-	binary.LittleEndian.PutUint32(reqData[8:12], uint32(attribs.TransMode))
-	binary.LittleEndian.PutUint32(reqData[12:16], attribs.MaxDelay)
-	binary.LittleEndian.PutUint32(reqData[16:20], attribs.CycleTime)
-
-	// Send add device notification request using ReadWrite
-	// Note: We need to use the low-level client methods here
-	// For now, this is a simplified implementation that doesn't fully support notifications
-	// A complete implementation would require modifying the client's receive loop
-
-	// This is a placeholder - actual notification support requires:
-	// 1. Modifying client.go to handle CmdADSDeviceNotification packets
-	// 2. Dispatching those packets to the notification manager
-	// 3. Parsing notification stamps and calling callbacks
-
-	req := ams.NewReadWriteRequest(
+	// Create AddDeviceNotification request
+	req := ams.NewAddDeviceNotificationRequest(
 		nm.session.targetAddr,
 		nm.session.senderAddr,
-		ams.IdxReadWriteSymValueByHandle,
-		handle,
-		4, // Read 4 bytes (notification handle)
-		reqData,
+		symbolInfo.IndexGroup,
+		symbolInfo.IndexOffset,
+		attribs.Length,
+		uint32(attribs.TransMode),
+		attribs.MaxDelay,
+		attribs.CycleTime,
 	)
 
-	// For now, return an error indicating this feature is not yet fully implemented
-	_ = req
-	return 0, fmt.Errorf("notification support requires client modifications (not yet implemented)")
-	/*
-		// This code would work if client supported notifications:
+	// Send the request
+	resp, err := nm.session.client.AddDeviceNotification(ctx, req)
+	if err != nil {
+		return 0, fmt.Errorf("failed to add notification: %w", err)
+	}
 
-		resp, err := nm.session.client.SendRequest(ctx, req)
-		if err != nil {
-			return 0, fmt.Errorf("failed to add notification: %w", err)
-		}
+	if resp.Result != ams.NoError {
+		return 0, fmt.Errorf("add notification error: %d", resp.Result)
+	}
 
-		respRW, ok := resp.(*ams.ReadWriteResponse)
-		if !ok {
-			return 0, fmt.Errorf("unexpected response type")
-		}
+	notificationHandle := resp.NotificationHandle
 
-		if respRW.Result != 0 {
-			return 0, fmt.Errorf("add notification error: %d", respRW.Result)
-		}
+	// Store handler
+	nm.mu.Lock()
+	nm.handlers[notificationHandle] = &notificationHandler{
+		handle:     notificationHandle,
+		varName:    varName,
+		varHandle:  handle,
+		callback:   callback,
+		symbolInfo: symbolInfo,
+	}
+	nm.mu.Unlock()
 
-		// Extract notification handle from response (first 4 bytes)
-		if len(respRW.Data) < 4 {
-			return 0, fmt.Errorf("invalid notification response")
-		}
-		notificationHandle := binary.LittleEndian.Uint32(respRW.Data[0:4])
-
-		// Store handler
-		nm.mu.Lock()
-		nm.handlers[notificationHandle] = &notificationHandler{
-			handle:     notificationHandle,
-			varName:    varName,
-			varHandle:  handle,
-			callback:   callback,
-			symbolInfo: symbolInfo,
-		}
-		nm.mu.Unlock()
-
-		return notificationHandle, nil
-	*/
+	return notificationHandle, nil
 }
 
 // Unsubscribe removes a notification subscription
@@ -184,12 +153,22 @@ func (nm *NotificationManager) Unsubscribe(ctx context.Context, notificationHand
 	delete(nm.handlers, notificationHandle)
 	nm.mu.Unlock()
 
-	// Build request data: notification handle (4 bytes)
-	reqData := make([]byte, 4)
-	binary.LittleEndian.PutUint32(reqData, notificationHandle)
+	// Create DeleteDeviceNotification request
+	req := ams.NewDeleteDeviceNotificationRequest(
+		nm.session.targetAddr,
+		nm.session.senderAddr,
+		notificationHandle,
+	)
 
-	// This is a placeholder - actual implementation would send delete notification
-	_ = reqData
+	// Send the request
+	resp, err := nm.session.client.DeleteDeviceNotification(ctx, req)
+	if err != nil {
+		return fmt.Errorf("failed to delete notification: %w", err)
+	}
+
+	if resp.Result != ams.NoError {
+		return fmt.Errorf("delete notification error: %d", resp.Result)
+	}
 
 	// Release the variable handle if no longer needed
 	// Note: In practice, you may want to keep handles cached
@@ -229,16 +208,40 @@ func (nm *NotificationManager) Stop() {
 
 // processNotifications processes incoming notification packets
 func (nm *NotificationManager) processNotifications() {
-	// This is a placeholder - in a real implementation, you would:
-	// 1. Listen for ADS device notification packets (command ID 8)
-	// 2. Parse the notification stamps from the packet
-	// 3. Look up the handler for each notification handle
-	// 4. Call the callback with the notification data
-	//
-	// For now, this would require integration with the client's receive loop
-	// to dispatch notification packets separately from request/response packets
+	// Set up the client callback to receive notifications
+	nm.session.client.SetNotificationCallback(func(req *ams.DeviceNotificationRequest) {
+		// Process each stamp in the notification
+		for _, stamp := range req.Stamps {
+			// Convert Windows FILETIME to Go time
+			// FILETIME is 100-nanosecond intervals since January 1, 1601
+			const ticksPerSecond = 10000000
+			const epochDiff = 11644473600 // Seconds between 1601 and 1970
+			secs := int64(stamp.Timestamp)/ticksPerSecond - epochDiff
+			nsecs := (int64(stamp.Timestamp) % ticksPerSecond) * 100
+			timestamp := time.Unix(secs, nsecs)
+
+			// Process each sample in the stamp
+			for _, sample := range stamp.Samples {
+				nm.mu.RLock()
+				handler, ok := nm.handlers[sample.Handle]
+				nm.mu.RUnlock()
+
+				if ok && handler.callback != nil {
+					// Call the user's callback with the notification data
+					handler.callback(NotificationSample{
+						Handle:    sample.Handle,
+						Timestamp: timestamp,
+						Data:      sample.Data,
+					})
+				}
+			}
+		}
+	})
 
 	<-nm.stopCh
+
+	// Clear the callback when stopping
+	nm.session.client.SetNotificationCallback(nil)
 }
 
 // UnsubscribeAll removes all notification subscriptions

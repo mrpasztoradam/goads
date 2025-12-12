@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/mrpasztoradam/goads/ams"
 )
@@ -20,11 +21,13 @@ func min(a, b int) int {
 
 // Session represents a cached ADS session with a specific target
 type Session struct {
-	client     *Client
-	targetAddr ams.Addr
-	senderAddr ams.Addr
-	registry   *SymbolRegistry
-	mu         sync.RWMutex
+	client            *Client
+	targetAddr        ams.Addr
+	senderAddr        ams.Addr
+	registry          *SymbolRegistry
+	notificationMgr   *NotificationManager
+	notificationMgrMu sync.Mutex
+	mu                sync.RWMutex
 }
 
 // SymbolInfo contains cached information about a PLC symbol
@@ -437,6 +440,49 @@ func (s *Session) GetSymbolCount() int {
 func (s *Session) HasSymbol(name string) bool {
 	_, ok := s.registry.Get(name)
 	return ok
+}
+
+// GetOrCreateNotificationManager returns the session's notification manager,
+// creating it if it doesn't exist yet
+func (s *Session) GetOrCreateNotificationManager() *NotificationManager {
+	s.notificationMgrMu.Lock()
+	defer s.notificationMgrMu.Unlock()
+
+	if s.notificationMgr == nil {
+		s.notificationMgr = s.NewNotificationManager()
+		// Start the notification manager
+		if err := s.notificationMgr.Start(); err != nil {
+			// Log error but don't fail - the manager can be started later
+			fmt.Printf("Warning: failed to start notification manager: %v\n", err)
+		}
+	}
+
+	return s.notificationMgr
+}
+
+// AddSymbolNotification subscribes to notifications for a specific symbol
+// The callback is called whenever the value changes in the PLC
+func (s *Session) AddSymbolNotification(
+	ctx context.Context,
+	varName string,
+	cycleTime time.Duration,
+	callback NotificationCallback,
+) (uint32, error) {
+	nm := s.GetOrCreateNotificationManager()
+	handle, err := nm.Subscribe(ctx, varName, cycleTime, callback)
+	if err != nil {
+		return 0, err
+	}
+
+	return handle, nil
+}
+
+// RemoveSymbolNotification unsubscribes from a notification
+func (s *Session) RemoveSymbolNotification(ctx context.Context, handle uint32) error {
+	if s.notificationMgr == nil {
+		return fmt.Errorf("no notification manager active")
+	}
+	return s.notificationMgr.Unsubscribe(ctx, handle)
 }
 
 // nullTerminatedString extracts a null-terminated string from a byte slice

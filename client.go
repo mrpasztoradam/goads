@@ -37,6 +37,10 @@ type Client struct {
 
 	adsState    atomic.Value // uint16
 	deviceState atomic.Value // uint16
+
+	// Notification callback handler
+	notificationCallback func(*ams.DeviceNotificationRequest)
+	notificationMu       sync.RWMutex
 }
 
 func (c *Client) ADSState() uint16 {
@@ -77,6 +81,13 @@ func (c *Client) Close() error {
 		return nil
 	}
 	return c.conn.Close()
+}
+
+// SetNotificationCallback sets the callback function for device notifications
+func (c *Client) SetNotificationCallback(callback func(*ams.DeviceNotificationRequest)) {
+	c.notificationMu.Lock()
+	defer c.notificationMu.Unlock()
+	c.notificationCallback = callback
 }
 
 func (c *Client) receive(ctx context.Context) error {
@@ -123,6 +134,12 @@ func (c *Client) receive(ctx context.Context) error {
 			pkt = &ams.ReadWriteResponse{}
 		case ams.IsReadStateRequest(hdr.AMSHeader):
 			pkt = &ams.ReadStateRequest{}
+		case ams.IsDeviceNotificationRequest(hdr.AMSHeader):
+			pkt = &ams.DeviceNotificationRequest{}
+		case ams.IsAddDeviceNotificationResponse(hdr.AMSHeader):
+			pkt = &ams.AddDeviceNotificationResponse{}
+		case ams.IsDeleteDeviceNotificationResponse(hdr.AMSHeader):
+			pkt = &ams.DeleteDeviceNotificationResponse{}
 		default:
 			log.Printf("client: unknown packet: %#v", hdr)
 			continue
@@ -130,7 +147,20 @@ func (c *Client) receive(ctx context.Context) error {
 
 		// decode the full packet with the header
 		if err := pkt.Decode(ams.NewBuffer(data)); err != nil {
+			// For device notifications, just log and continue - don't fail the entire receive loop
+			if _, isNotification := pkt.(*ams.DeviceNotificationRequest); isNotification {
+				// Only log if we have a callback registered
+				c.notificationMu.RLock()
+				hasCallback := c.notificationCallback != nil
+				c.notificationMu.RUnlock()
+				if hasCallback {
+					log.Printf("client: failed to decode notification: %s", err)
+				}
+				bufferPool.Put(bufPtr)
+				continue
+			}
 			log.Printf("client: failed to decode: %s", err)
+			bufferPool.Put(bufPtr)
 			return err
 		}
 
@@ -140,6 +170,25 @@ func (c *Client) receive(ctx context.Context) error {
 			if err := c.handleReadStateRequest(ctx, req); err != nil {
 				return err
 			}
+
+		// handle incoming device notifications
+		case *ams.DeviceNotificationRequest:
+			c.notificationMu.RLock()
+			callback := c.notificationCallback
+			c.notificationMu.RUnlock()
+			if callback != nil {
+				// Call callback, but handle any panics gracefully
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("client: panic in notification callback: %v", r)
+						}
+					}()
+					callback(req)
+				}()
+			}
+			bufferPool.Put(bufPtr)
+			continue
 
 		// forward responses to handlers
 		default:
@@ -278,6 +327,32 @@ func (c *Client) Write(ctx context.Context, r *ams.WriteRequest) (*ams.WriteResp
 	var resp *ams.WriteResponse
 	err := c.send(ctx, r, func(r ams.Response) error {
 		if x, ok := r.(*ams.WriteResponse); ok {
+			resp = x
+			return nil
+		}
+		return fmt.Errorf("got %T want %T", r, resp)
+	})
+	return resp, err
+}
+
+// AddDeviceNotification sends an AddDeviceNotification request to the server.
+func (c *Client) AddDeviceNotification(ctx context.Context, r *ams.AddDeviceNotificationRequest) (*ams.AddDeviceNotificationResponse, error) {
+	var resp *ams.AddDeviceNotificationResponse
+	err := c.send(ctx, r, func(r ams.Response) error {
+		if x, ok := r.(*ams.AddDeviceNotificationResponse); ok {
+			resp = x
+			return nil
+		}
+		return fmt.Errorf("got %T want %T", r, resp)
+	})
+	return resp, err
+}
+
+// DeleteDeviceNotification sends a DeleteDeviceNotification request to the server.
+func (c *Client) DeleteDeviceNotification(ctx context.Context, r *ams.DeleteDeviceNotificationRequest) (*ams.DeleteDeviceNotificationResponse, error) {
+	var resp *ams.DeleteDeviceNotificationResponse
+	err := c.send(ctx, r, func(r ams.Response) error {
+		if x, ok := r.(*ams.DeleteDeviceNotificationResponse); ok {
 			resp = x
 			return nil
 		}
