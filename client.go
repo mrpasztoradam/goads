@@ -77,11 +77,6 @@ func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
-type responseDecoder interface {
-	ams.Response
-	ams.Decoder
-}
-
 func (c *Client) receive(ctx context.Context) error {
 	c.SetADSState(ams.ADSStateRun)
 	c.SetDeviceState(ams.ADSStateRun)
