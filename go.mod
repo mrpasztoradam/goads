@@ -1,4 +1,4 @@
-module github.com/gotwincat/twincat
+module github.com/mrpasztoradam/goads
 
 go 1.17
 

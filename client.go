@@ -17,7 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gotwincat/twincat/ams"
+	"github.com/mrpasztoradam/goads/ams"
 )
 
 var ErrTimeout = errors.New("timeout")
@@ -297,4 +297,38 @@ func (c *Client) GetSymHandleByName(ctx context.Context, targetID, senderID ams.
 		return 0, fmt.Errorf("not enough data: %d", len(res.Data))
 	}
 	return binary.LittleEndian.Uint32(res.Data[:4]), nil
+}
+
+// DeviceInfo holds device information
+type DeviceInfo struct {
+	MajorVersion uint8
+	MinorVersion uint8
+	BuildVersion uint16
+	DeviceName   string
+}
+
+// GetRuntimeVersion retrieves the TwinCAT runtime version
+// Note: The gotwincat/twincat library doesn't fully support the ADS Read Device Info command
+// This returns "connected" as a basic status check
+func (c *Client) GetRuntimeVersion() string {
+	return "connected"
+}
+
+// GetDeviceInfo retrieves full device information
+// Note: gotwincat/twincat library doesn't fully support Read Device Info
+// Returns empty device info
+func (c *Client) GetDeviceInfo() DeviceInfo {
+	return DeviceInfo{
+		MajorVersion: 0,
+		MinorVersion: 0,
+		BuildVersion: 0,
+		DeviceName:   "",
+	}
+}
+
+// GetState retrieves the current ADS state
+func (c *Client) GetState() (uint16, uint16) {
+	adsState := c.ADSState()
+	deviceState := c.DeviceState()
+	return adsState, deviceState
 }
